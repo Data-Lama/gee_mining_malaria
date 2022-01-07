@@ -1,0 +1,23 @@
+
+// General constants
+var BANDSL7 = ee.List(["B1", "B2", "B3", "B4", "B5", "B6_VCID_1", "B6_VCID_2", "B7", "B8"]);
+var BANDSL8 = ee.List(["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B10", "B11"]);
+var QA_PIXEL_THRESHOLDL7 = 672;            
+var QA_PIXEL_THRESHOLDL8 = 2720; 
+exports.NO_MINE_COLOR = '#91F8FF';
+exports.MINE_COLOR = '#FF0073';
+
+// Trainning constants
+exports.start_date = "2010-01-01";
+exports.end_date = "2011-01-01";
+exports.sampleSize = 2500;
+exports.label = "miningClass";
+exports.hyperparameterTunning = false;
+exports.numClassifiers = 1;     // Based on probability that each trainning pixel will be sampled at least once
+exports.gammaParameter = 0.01;   // From Hyperparameter tunning accuracy: 80.5
+exports.costParameter = 1.4;     // From Hyperparameter tunning accuracy: 80.5
+exports.exportImg = false;
+
+// Salelite specific constants
+exports.QA_pixelThreshold = QA_PIXEL_THRESHOLDL7;
+exports.bands = BANDSL7;

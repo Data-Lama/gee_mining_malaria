@@ -1,0 +1,137 @@
+
+/* Calculates and adds indices to image.
+ *
+ * img - image to add indices to.
+ */
+exports.addIndices = function(img){
+  var ndvi = img.normalizedDifference(['B4', 'B3']).rename(['ndvi']);
+  var ndbi = img.normalizedDifference(['B5', 'B4']).rename(['ndbi']);
+  var mndwi = img.normalizedDifference(['B2', 'B5']).rename(['mndwi']); 
+  var bsi = img.expression(
+      '(( X + Y ) - (A + B)) /(( X + Y ) + (A + B)) ', {
+        'X': img.select('B5'), //swir1
+        'Y': img.select('B3'),  //red
+        'A': img.select('B4'), // nir
+        'B': img.select('B1'), // blue
+  }).rename(['bsi']);
+  return img.addBands(ndvi).addBands(ndbi).addBands(mndwi).addBands(bsi);
+};
+
+/* Counts number of pixels for a given geometry.
+ *
+ * img - image to apply geoemtry to.
+ * geometry - geometry to count pixels within
+ */
+exports.countPixels = function(img, geometry) {
+  var count = img.reduceRegion({
+    reducer: ee.Reducer.count(),
+    geometry: geometry,
+    scale: 30,
+    maxPixels: 50000000
+    });
+  return count;
+};
+
+
+/* Gets trainning data based on desired sample sizes.
+ *
+ * miningSampleSize - sample size for mining sample
+ * nonMiningSampleSize - sample size for non mining sample
+ * minesGeom - geometry of mines to sample within
+ * nonMinesGeom - geometry of non-mines to sample within
+ * img - image to sample
+ * label - label of class for classification
+ * seed - seed for random sampling
+ */
+exports.getTrainningData = function(miningSampleSize, nonMiningSampleSize,
+  minesGeom, nonMinesGeom, img, label, seed) {
+  var miningImage = img.addBands(ee.Image.constant(1).rename([label]));
+  
+  var sampleMining = miningImage.stratifiedSample({
+                            numPoints: miningSampleSize,
+                            classBand: label,
+                            region: minesGeom,
+                            seed: seed,
+                            scale: 30});
+  
+  var nonMiningImage = img.addBands(ee.Image.constant(0).rename([label]));
+                            
+  var sampleNotMining = nonMiningImage.stratifiedSample({
+                            numPoints: nonMiningSampleSize,
+                            classBand: label,
+                            region: nonMinesGeom,
+                            seed: seed,
+                            scale: 30});                          
+  
+  var trainningData = sampleMining.merge(sampleNotMining);
+  
+  // trainningData = standardizeFeatureCollection(trainningData, miningImage.bandNames())
+
+  return trainningData;
+};
+
+
+/* Standarizes feature collection's properties .
+ *
+ */
+function standardizeFeatureCollection(fc, bandNames) {
+  
+    var numBands = ee.Number(bandNames.length()).subtract(1);
+  
+  // Calculate mean of multiple FeatureCollection properties.
+    var bandsMeans = fc.reduceColumns({
+      reducer: ee.Reducer.mean().repeat(bandNames.length()),
+      selectors: bandNames
+    });
+    
+    bandsMeans = ee.List(bandsMeans.values().get(0));
+    //Manually adjust mean for class label to avoid standarizing
+    bandsMeans = ee.Array(bandsMeans.set(numBands, 0));
+    
+    var bandsStdvs = fc.reduceColumns({
+      reducer: ee.Reducer.stdDev().repeat(bandNames.length()),
+      selectors: bandNames
+    });
+    
+    bandsStdvs = ee.List(bandsStdvs.values().get(0));
+    //Manually adjust stdv for class label to avoid standarizing
+    bandsStdvs = ee.Array(bandsStdvs.set(numBands, 1));
+
+    var standarized = fc.map(function(f) {
+      var fStdd = f.toArray(bandNames).subtract(bandsMeans).divide(bandsStdvs);
+      var properties = ee.Dictionary.fromLists(bandNames, fStdd.toList());
+      return ee.Feature(f.geometry(), properties);
+    });
+    
+    return ee.FeatureCollection(standarized);
+}
+
+exports.standardizeImage = function(img, geometry){
+  var bandNames = img.bandNames();
+  // Mean center the data to enable a faster covariance reducer
+  // and an SD stretch of the principal components.
+  var meanDict = img.reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: geometry,
+    scale: 20,
+    maxPixels: 1e9,
+    bestEffort: true,
+    tileScale: 16
+  });
+  var means = ee.Image.constant(meanDict.values(bandNames));
+  var centered = img.subtract(means)
+  
+  var stdDevDict = img.reduceRegion({
+    reducer: ee.Reducer.stdDev(),
+    geometry: geometry,
+    scale: 20,
+    maxPixels: 1e9,
+    bestEffort: true,
+    tileScale: 16
+  });
+  var stddevs = ee.Image.constant(stdDevDict.values(bandNames));
+
+  var standardized = centered.divide(stddevs);
+   
+  return standardized;
+};

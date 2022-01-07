@@ -1,0 +1,145 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var colombiaOutline = ee.FeatureCollection("users/andreaparrasb/colombia_outline"),
+    colombiaDeptos = ee.FeatureCollection("users/andreaparrasb/deptos_simplified"),
+    geometry = 
+    /* color: #d63000 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-71.22623049426576, 5.626550445870616],
+          [-71.22623049426576, 0.8016051492839511],
+          [-66.56802736926576, 0.8016051492839511],
+          [-66.56802736926576, 5.626550445870616]]], null, false),
+    colombiaMunicipalities = ee.FeatureCollection("users/andreaparrasb/colombia_municipalities");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+//************************************************************************** 
+//                                 Imports
+//**************************************************************************
+var projectFunctions = require('users/andreaparrasb/mining:projectFunctions');
+var projectConstants = require('users/andreaparrasb/mining:projectConstants');
+var modelFunctions = require('users/andreaparrasb/mining:modelFunctions');
+
+
+// colombiaDeptos = colombiaDeptos.geometry();
+colombiaOutline = colombiaOutline.geometry();
+
+// Creates gold mining feature colection
+var mines = ee.FeatureCollection("users/andreaparrasb/mining_polygons").geometry();
+var notMines = ee.FeatureCollection("users/andreaparrasb/master_no_mines").geometry();
+
+var guainia = colombiaDeptos.filter(ee.Filter.eq('code', '94'))
+var inirida = colombiaMunicipalities.filter(ee.Filter.eq('MPIO_CDPMP', '94001'))
+
+//************************************************************************** 
+//                                Datasets
+//**************************************************************************
+
+var l7Collection = ee.ImageCollection("LANDSAT/LE07/C01/T1_RT");
+var alos = ee.Image("JAXA/ALOS/AW3D30/V2_2"); // Slope 
+var alosMTPI = ee.Image('CSP/ERGo/1_0/Global/ALOS_mTPI');
+
+// ************************************************************************** 
+//                                Constants
+// **************************************************************************
+
+// Trainning constants
+var start_date = projectConstants.start_date;
+var end_date = projectConstants.end_date;
+var sampleSize = projectConstants.sampleSize;
+var label = projectConstants.label;
+var hyperparameterTunning = projectConstants.hyperparameterTunning;
+var bootstrapping = projectConstants.bootstrapping;
+var numClassifiers = projectConstants.numClassifiers;
+var gamma = projectConstants.gammaParameter;   // From Hyperparameter tunning accuracy: 80.5
+var cost = projectConstants.costParameter;     // From Hyperparameter tunning accuracy: 80.5
+var exportImg = projectConstants.exportImg;
+// Salelite specific constants
+var QA_pixelThreshold = projectConstants.QA_pixelThreshold;
+var bands = projectConstants.bands;
+
+
+//************************************************************************** 
+//                            Preprocessing
+//**************************************************************************
+
+var l7Bounded = l7Collection
+    .filterDate(start_date, end_date)
+    .filterBounds(colombiaOutline)
+    .map(function(img) {
+      // Remove clouds
+      return img.mask(img.select('BQA').eq(QA_pixelThreshold));
+    });
+
+var l7BoundedImage = l7Bounded.reduce(ee.Reducer.median())
+                              .rename("B1", "B2", "B3", "B4", "B5", "B6_VCID_1", "B6_VCID_2", "B7", "B8", "BQA")
+                              .select(bands)
+                              .clip(colombiaOutline);
+
+
+
+var l7BoundedImage = projectFunctions.addIndices(l7BoundedImage);
+
+
+// Add elevation and slope information as a way to avoid having to correct for it. 
+// Just include it as one of the variables. Divide by maximuns to get between 0-1.
+var elev = alos.select('AVE_DSM').divide(2000).rename('elev');
+var slope = ee.Terrain.slope(alos.select('AVE_DSM')).divide(30).rename('slope');
+var l7BoundedImage = l7BoundedImage.addBands(elev).addBands(slope);
+
+// Add new bands
+var trainningBands = bands.cat(["ndvi", "ndbi", "mndwi", "bsi",  "slope", "elev"]);   
+
+// var availableNonMinePixels = countPixels(l7BoundedImage, notMines.geometry())  // 2855553
+// var availableMinePixels = countPixels(l7BoundedImage, mines.geometry())        // 85114
+
+
+//************************************************************************** 
+//                        Trainning and Testing
+//**************************************************************************                         
+
+
+if(hyperparameterTunning) {
+  
+  var trainningData = projectFunctions.getTrainningData(sampleSize, sampleSize,
+  mines, notMines, l7BoundedImage, label, 0);
+  
+  // Run hyperparameter tunning
+  modelFunctions.hyperparameterTunning(trainningData, trainningBands, 0.7, label);
+
+  
+} else {
+
+  var trainningDataDict = ee.Dictionary({
+    "trainningBands": trainningBands,
+    "label": label,
+    "minesGeom": mines,
+    "notMinesGeom": notMines,
+    "minesSampleSize": sampleSize,
+    "notMineSampleSize": sampleSize
+  })
+  
+  // Run model
+  var classifiersList = modelFunctions.trainModel(l7BoundedImage, gamma, cost, numClassifiers, trainningDataDict);
+  
+  var iniridaImg = l7BoundedImage.clip(inirida)
+  var classified = modelFunctions.runModel(iniridaImg, classifiersList, trainningBands);
+  
+  var minePixels = classified.mask(classified.select('classification_mode').eq(1))
+  
+  if (exportImg){
+    Export.image.toDrive({image: minePixels,
+                          folder: "mining_malaria",
+                          fileNamePrefix: "minesInirida",
+                          scale: 30,
+                          crs: 'EPSG:4326', 
+                          maxPixels: 1e13
+    })
+  }
+  // Map.addLayer(l7BoundedImage, {"bands": ["B3", "B2", "B1"]}, "minesCollection"); 
+  Map.addLayer(classified, {min: 0, max: 1, palette: [projectConstants.NO_MINE_COLOR, projectConstants.MINE_COLOR]}, 'classification');
+  
+}

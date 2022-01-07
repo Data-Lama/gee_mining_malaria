@@ -1,0 +1,120 @@
+// Imports
+var projectFunctions = require('users/andreaparrasb/mining:projectFunctions');
+
+
+/* Runs hyperparameter tunning on cost and gamma and exports results to Drive as a CSV
+ * trainningData - ee.FeatureCollection containing as properties the trainning bands and class label.
+ * trainningBands - ee.List of properties to be used as trainning features.
+ * trainningSampleSize - (0, 1) percentage to split trainning and validation set (decimal).
+ * label - label used to identify class property.
+ */
+exports.hyperparameterTunning = function(trainningData, trainningBands, trainningSampleSize, label){
+  
+  print("Performing hyperparameter tunning for cost and gamma.");
+  // Add a random column and split data into training and validation set
+  trainningData = trainningData.randomColumn();
+  
+  var trainningSample = trainningData.filter(ee.Filter.lt('random', trainningSampleSize));
+  var validationSample = trainningData.filter(ee.Filter.gte('random', trainningSampleSize));
+  
+  
+  // Tune the gamma parameter.
+  // Defaults to the reciprocal of the number of features: 0.06
+  var gammaList = ee.List.sequence(0.01, 0.1, 0.01);
+  var costList = ee.List.sequence(0.5, 2, 0.02);
+  
+  var accuracies = gammaList.map(function(gamma) {
+    return costList.map(function(cost) {
+      var classifier = ee.Classifier.libsvm({
+        kernelType: 'RBF',
+        gamma: gamma,
+        cost: cost
+      }).train({
+          features: trainningSample,
+          classProperty: label,
+          inputProperties: trainningBands});
+  
+      // Here we are classifying a table instead of an image
+      // Classifiers work on both images and tables
+      var accuracy = validationSample
+        .classify(classifier)
+        .errorMatrix(label, 'classification')
+        .accuracy();
+      
+      return ee.Feature(null, {
+        'accuracy': accuracy,
+        'gamme': gamma,
+        'cost': cost});
+    });
+  }).flatten();
+  
+  var accuraciesFc = ee.FeatureCollection(accuracies);
+  
+  // Export the result as CSV
+  Export.table.toDrive({
+    collection: accuraciesFc,
+    description: 'Hyperparameter_Tuning_ResultsSVM',
+    folder: 'mining_malaria',
+    fileNamePrefix: 'gamma_cost',
+    fileFormat: 'CSV'});
+             
+};
+
+
+/* Trains SVM and returns trainned classifiers.
+ * img - image to train classifiers on
+ * trainningBands - ee.List of properties to be used as trainning features.
+ * label - label used to identify class property.
+ * gamma - gamma parameter for the classifier.
+ * cost - cost parameter for the classifier.
+ * numClassifiers - number of classifiers to train. 
+ */
+exports.trainModel = function(img, gamma, cost, numClassifiers, trainningDataDict) {
+    
+    var trainningBands = trainningDataDict.get("trainningBands");
+    var label = trainningDataDict.get("label");
+    var minesGeom = trainningDataDict.get("minesGeom");
+    var notMinesGeom = trainningDataDict.get("notMinesGeom");
+    var minesSampleSize = trainningDataDict.get("minesSampleSize");
+    var notMineSampleSize = trainningDataDict.get("notMineSampleSize");
+    
+    
+    var numClassifiersList = ee.List.sequence(1, ee.Number(numClassifiers).multiply(20), 20); // start, end, step, count
+    print("Bootstrapping. Trainning " + ee.Number(numClassifiersList.size()).getInfo()  + " classifiers.");
+    
+    var classifiersList = numClassifiersList.map(function(randSeed) {
+
+      var trainningSample = projectFunctions.getTrainningData(minesSampleSize, notMineSampleSize, minesGeom,
+        notMinesGeom, img, label, randSeed);
+        
+      var classifier = ee.Classifier.libsvm({
+        kernelType: 'RBF',
+        gamma: gamma,
+        cost: cost
+      }).train({
+            features: trainningSample,
+            classProperty: label,
+            inputProperties: trainningBands});
+          
+      return classifier;
+  });
+  
+  return classifiersList;
+};
+
+/* Runs SVM and returns classified image.
+ * img - image to classify
+ * classifiersList - ee.List of trainned classifiers to use for classification.
+ * trainningBands - ee.List of properties to be used as trainning features.
+ */
+exports.runModel = function(img, classifiersList, trainningBands) {
+    
+    var classifiedImages = classifiersList.map(function(classifier) {
+    return img.select(trainningBands).classify(classifier);
+  });
+  
+  // Combine images as one
+  var bootstrapImage = ee.ImageCollection(classifiedImages);
+  var classified = bootstrapImage.reduce(ee.Reducer.mode());
+  return classified;
+};
